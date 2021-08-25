@@ -1,0 +1,187 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Serverless private URL shortener based on Amazon S3, AWS Lambda, Amazon CloudFront and API Gateway.
+
+Parameters:
+  S3BucketName:
+    Type: String
+    Description: Enter the Amazon S3 bucket to use for the URL shortener, or leave empty to create a new bucket with automatically generated name. The S3 bucket is kept after you delete this template.
+
+Conditions:
+  CreateNewBucket: !Equals ["", !Ref S3BucketName]
+
+Outputs:
+  S3BucketName:
+    Description: "Amazon S3 bucket name holding short URLs redirect objects. Note: the bucket will not be deleted when you delete this template."
+    Value: !Ref S3BucketForURLs
+  ConnectURL:
+    Description: URL to connect to the admin page of the URL Shortener. Do not use until you update the template with the API Gateway endpoint you need to manually create.
+    Value: !Sub "https://${CloudFrontDistrib.DomainName}/admin/"
+
+Resources:
+
+  ######################################################################
+  #
+  # Amazon S3 bucket to store the HTML form and the redirection objects
+  #   the 'u' folder is used for redirect objects and is public
+  #
+  ######################################################################
+  S3BucketForURLs:
+    Type: "AWS::S3::Bucket"
+    DeletionPolicy: Delete
+    Properties:
+      BucketName: !If [ "CreateNewBucket", !Ref "AWS::NoValue", !Ref S3BucketName ]
+      BucketEncryption: 
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      WebsiteConfiguration:
+        IndexDocument: "index.html"
+
+ 
+  ######################################################################
+  #
+  # CloudFront distribution for the global project
+  #
+  ######################################################################
+  CloudFrontDistrib:
+    Type: "AWS::CloudFront::Distribution"
+    Properties:
+      DistributionConfig:
+        Origins:
+          -
+            DomainName: !Sub "${URLShortenerAPI}.execute-api.${AWS::Region}.amazonaws.com"
+            Id: OriginAPIGW
+            OriginPath: "/prod"
+            CustomOriginConfig:
+              OriginProtocolPolicy: "match-viewer"
+              OriginSSLProtocols: [ "TLSv1.2" ]
+        Comment: CloudFront distribution used as a front end to the server-less URL Shortener
+        Enabled: true
+        DefaultCacheBehavior:
+          ForwardedValues:
+            QueryString: false
+          TargetOriginId: "OriginAPIGW"
+          ViewerProtocolPolicy: "redirect-to-https"
+        CacheBehaviors:
+          -
+            PathPattern: "/admin_*"
+            TargetOriginId: "OriginAPIGW"
+            AllowedMethods: [ DELETE, GET, HEAD, OPTIONS, PATCH, POST, PUT ]
+            ForwardedValues:
+              Headers: [ Authorization ]
+              QueryString: false
+            ViewerProtocolPolicy: "https-only"
+          -
+            PathPattern: "/"
+            TargetOriginId: "OriginAPIGW"
+            AllowedMethods: [ HEAD, GET ]
+            DefaultTTL: 0
+            MaxTTL: 0
+            ForwardedValues:
+              Headers: [ Authorization ]
+              QueryString: false
+            ViewerProtocolPolicy: "redirect-to-https"
+
+  # Invoke permission for Lambda
+  LambdaShortenerInvokePermission:
+    Type: "AWS::Lambda::Permission"
+    Properties:
+      FunctionName: !GetAtt LambdaShortener.Arn
+      Action: "lambda:InvokeFunction"
+      Principal: "apigateway.amazonaws.com"
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${URLShortenerAPI}/*/POST/admin_shrink_url"
+  LambdaRedirectorInvokePermission:
+    Type: "AWS::Lambda::Permission"
+    Properties:
+      FunctionName: !GetAtt LambdaRedirector.Arn
+      Action: "lambda:InvokeFunction"
+      Principal: "apigateway.amazonaws.com"
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${URLShortenerAPI}/*/GET/*"
+  
+  ######################################################################
+  #
+  # API Gateway definition for the Lambda functions
+  #
+  ######################################################################
+  URLShortenerAPI:
+    Type: "AWS::ApiGateway::RestApi"
+    Properties:
+      Description: Rest API for URL Shortener
+      Name: !Ref LambdaShortener
+      FailOnWarnings: true
+      Body:
+        swagger: "2.0"
+        info:
+          title: "URLShortener"
+        schemes: [ https ]
+        paths:
+          /admin:
+            get:
+              consumes: [ "application/json" ]
+              produces: [ "application/json" ]
+              responses:
+                "200":
+                  description: "200 response"
+                  headers:
+                    Content-Type:
+                      type: "string"
+              x-amazon-apigateway-integration:
+                passthroughBehavior: "when_no_match"
+                requestTemplates:
+                  application/json: "{\"statusCode\": 200}"
+                type: "mock"
+
+
+          /admin_shrink_url:
+            post:
+              produces: [ "application/json" ]
+              responses:
+                "200":
+                  description: "200 response"
+              x-amazon-apigateway-integration:
+                responses:
+                  default:
+                    statusCode: "200"
+                uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${LambdaShortener.Arn}/invocations"
+                passthroughBehavior: "when_no_match"
+                httpMethod: "POST"
+                type: "aws"
+          /{key}:
+            get:
+              consumes: [ "application/json" ]
+              parameters:
+              - name: "key"
+                in: "path"
+                required: true
+                type: "string"
+              responses:
+                "302":
+                  description: "302 response"
+                  headers:
+                    Location:
+                      type: "string"
+              x-amazon-apigateway-integration:
+                responses:
+                  default:
+                    statusCode: "302"
+                    responseParameters:
+                      method.response.header.Location: "integration.response.body.Redirect"
+                uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${LambdaRedirector.Arn}/invocations"
+                requestTemplates:
+                  application/json: "{ \"Key\": \"$input.params('key')\" }"
+                passthroughBehavior: "never"
+                httpMethod: "POST"
+                contentHandling: "CONVERT_TO_TEXT"
+                type: "aws"
+
+  URLShortenerAPIDeployment:
+    Type: "AWS::ApiGateway::Deployment"
+    Properties:
+      RestApiId: !Ref URLShortenerAPI
+  URLShortenerAPIStage:
+    Type: "AWS::ApiGateway::Stage"
+    Properties:
+      StageName: "prod"
+      Description: "Prod stage"
+      RestApiId: !Ref URLShortenerAPI
+      DeploymentId: !Ref URLShortenerAPIDeployment
