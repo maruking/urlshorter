@@ -1,0 +1,82 @@
+# S3 url-short-bucket
+# Cloudfront Origin - Behaviors 
+# API Gateway URLShort-Api
+# lambda Function
+# - URLredirectorFunction
+# - URLShortFunction
+# - S3shorturllistFunction
+# - index-redirect
+
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  url-shorter
+
+  Sample SAM Template for sam-app
+
+Globals:
+  Function:
+    Timeout: 3
+
+Resources:
+  URLShortFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: shortener/
+      Handler: app.lambda_handler
+      Runtime: python3.7
+      Environment:
+        Variables:
+          S3_BUCKET: 'url-short-bucket'
+      Events:
+        URLShortApi:
+          Type: Api
+          Properties:
+            Path: /admin_shrink_url
+            Method: post
+        BucketEvent1:
+          Type: S3
+          Properties:
+            Bucket: 'url-short-bucket'
+            Events:
+              - 's3:ObjectCreated:*'
+              - 's3:ObjectRemoved:*'
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: prefix
+                    Value: images/
+                  - Name: suffix
+                    Value: .jpg
+  URLredirectorFunction:
+      Type: AWS::Serverless::Function
+      Properties:
+        CodeUri: redirector/
+        Handler: app.lambda_handler
+        Runtime: python3.7
+  S3shorturllistFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: url_list/
+      Handler: app.lambda_handler
+      Runtime: python3.7
+      Environment:
+        Variables:
+          S3_BUCKET: 'url-short-bucket'
+          S3_PREFIX: 'u/'
+      Events:
+        URLShortApi:
+          Type: Api
+          Properties:
+            Path: /admin_list_url
+            Method: get
+  IndexRedirectFunction:
+      Type: AWS::Serverless::Function
+      Properties:
+        CodeUri: /index_redirect
+        Handler: app.lambda_handler
+        Runtime:  nodejs14
+
+Outputs:
+  HelloWorldApiDomain:
+    Value: !Sub "${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com"
